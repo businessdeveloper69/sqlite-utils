@@ -1466,6 +1466,7 @@ class Database:
         _column_comments: Mapping[str, ColumnComments] | None = None,
         _autoincrement: str | None = None,
         _uniques: Iterable[Unique] | None = None,
+        _generated_column_types: Mapping[str, str] | None = None,
     ) -> str:
         """
         Returns the SQL ``CREATE TABLE`` statement for creating the specified table.
@@ -1698,13 +1699,13 @@ class Database:
             # Refs https://github.com/simonw/sqlite-utils/issues/644
             if strict and column_type_str == "FLOAT":
                 column_type_str = "REAL"
-            column_definition = "   {} {column_type}{column_extras}".format(
-                quote_identifier(column_name),
-                column_type=column_type_str,
-                column_extras=(
-                    (" " + " ".join(column_extras)) if column_extras else ""
-                ),
-            )
+            declared_type = (_generated_column_types or {}).get(column_name)
+            if declared_type is not None and declared_type != column_type_str:
+                column_type_str = (
+                    quote_identifier(declared_type) if declared_type else ""
+                )
+            parts = [quote_identifier(column_name), column_type_str, *column_extras]
+            column_definition = "   " + " ".join(filter(None, parts))
             column_defs.append(
                 _column_definition_with_comments(
                     column_definition, column_comments.get(column_name)
@@ -3137,19 +3138,22 @@ class Table(Queryable):
                     create_table_foreign_keys.append(fk_with_renamed_columns(fk))
 
         new_table_name = f"{self.name}_new_{tmp_suffix or os.urandom(6).hex()}"
-        current_column_pairs = list(self.columns_dict.items())
         new_column_pairs = []
-        copy_from_to = {column: column for column, _ in current_column_pairs}
-        for name, type_ in current_column_pairs:
-            type_ = types.get(name) or type_
+        copy_from_to = {}
+        generated_column_types = {}
+        for original_column in self.columns:
+            name = original_column.name
             if name in drop:
-                del copy_from_to[name]
                 continue
             new_name = rename.get(name) or name
-            new_column_pairs.append((new_name, type_))
+            new_column_pairs.append(
+                (new_name, types.get(name) or existing_columns[name])
+            )
             if name in existing_generated:
-                # Computed by SQLite, so there is nothing to copy
-                del copy_from_to[name]
+                # SQLite recomputes the expression. Its declared type controls
+                # affinity, including when the original column has no type.
+                if name not in types:
+                    generated_column_types[new_name] = original_column.type
             else:
                 copy_from_to[name] = new_name
         # New generated columns, used by add_column(generated=StoredColumn(...))
@@ -3251,6 +3255,10 @@ class Table(Queryable):
                 _autoincrement=create_table_autoincrement,
                 _uniques=create_table_uniques,
                 generated=create_table_generated,
+                # Converting to STRICT still uses the supported SQLite types.
+                _generated_column_types=(
+                    None if strict and not self.strict else generated_column_types
+                ),
             ).strip()
         )
 

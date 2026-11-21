@@ -174,6 +174,43 @@ def test_transform_change_type_of_generated_column(db):
     assert rows(db)[0]["qty"] == "4"
 
 
+@pytest.mark.parametrize("storage", ["VIRTUAL", "STORED"])
+@pytest.mark.parametrize("declared_type", ["", "DECIMAL(12,2)"])
+def test_transform_preserves_generated_column_type(db, declared_type, storage):
+    db.execute(
+        f"create table scores (value integer, score {declared_type} as (value) {storage})"
+    )
+    db.execute("insert into scores (value) values (2), (10)")
+    table = db["scores"]
+    table.transform(rename={"score": "points"})
+
+    assert table.columns[1].type == declared_type
+    assert list(
+        db.execute("select points, typeof(points) from scores order by points")
+    ) == [
+        (2, "integer"),
+        (10, "integer"),
+    ]
+    assert list(db.execute("select points from scores where points >= 9")) == [(10,)]
+    table.transform(types={"points": str})
+    assert list(db.execute("select points from scores order by points")) == [
+        ("10",),
+        ("2",),
+    ]
+
+
+def test_transform_generated_column_to_strict_table(db):
+    if not db.supports_strict:
+        pytest.skip("No STRICT support")
+    db.execute("create table scores (value integer, score DECIMAL(12,2) as (value))")
+    db.execute("insert into scores (value) values (10)")
+    table = db["scores"]
+    table.transform(strict=True)
+    assert table.strict
+    assert table.columns[1].type == "REAL"
+    assert list(db.execute("select typeof(score) from scores")) == [("real",)]
+
+
 def test_generated_column_cannot_be_primary_key(db):
     with pytest.raises(AlterError):
         db["items"].transform(pk="total_s")
